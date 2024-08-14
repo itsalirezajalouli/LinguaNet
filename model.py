@@ -1,11 +1,14 @@
 #   Imports
 
 import torch
-from torch.utils.data import DataLoader, Dataset, random_split
-import unicodedata
 import string
+import unicodedata
+from idlmam import *
 import torch.nn as nn
 import requests, zipfile, io
+import torch.nn.functional as F
+from sklearn.metrics import accuracy_score
+from torch.utils.data import DataLoader, Dataset, random_split
 
 #   Dataset pre-process
 
@@ -55,7 +58,7 @@ class langNameDataset(Dataset):
 
     def string2InputVec(self, inputString):
         '''
-        This method convers any input tring into a vector of long values,
+        This method converts any input string into a vector of long values,
         according to the vocabulary used by this object.
         inputString: the string to convert to a tensor
         '''
@@ -83,3 +86,73 @@ trainSplit, testSplit = random_split(dataSet, (len(dataSet) - 300, 300))
 trainLoader = DataLoader(trainSplit, batch_size = 1, shuffle = True)
 testLoader = DataLoader(testSplit, batch_size = 1, shuffle = False)
 
+#   Last time step object
+
+class lastTimeStep(nn.Module):
+    '''
+    A class for extracting the hidden activations of the last time step
+    following the output of a PyTorch RNN module.
+    '''
+
+    def __init__(self, rnnLayers = 1, bidirectional = False) -> None:
+        super(lastTimeStep, self).__init__()
+        self.rnnLayers = rnnLayers
+        if bidirectional:
+            self.numDircetions = 2
+        else:
+            self.numDircetions = 1
+
+    def forward(self, input):
+        rnnOutput = input[0]                                                        #   result is either (out, ht) or (out, (ht, ct))
+
+        lastStep = input[1]                                                         #   last step is ht
+                                                                                    #   unless it's a tuple which then it's the first item in the tuple
+
+        if (type(lastStep) == tuple):
+            lastStep = input[0]
+        
+        batchSize = lastStep.shape[1]
+
+        lastStep = lastStep.view(self.rnnLayers, self.numDircetions, batchSize, -1) #   per the docs, shape: (numLayers * numDirections, batch, hiddenSize )
+
+        lastStep = lastStep[self.rnnLayers - 1]
+
+        lastStep = lastStep.permute(1, 0, 2)
+
+        return lastStep.reshape(batchSize, -1)                                      #   Flattens the last 2 dimentions into one (out, ht) or (out, (ht, ct))
+
+#   Hyperparameters
+
+dim = 64
+vocabSize = len(allLetters)
+hiddenNodes = 256
+classes = len(dataSet.labelNames)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+#   Model
+
+rnnModel = nn.Sequential(
+    nn.Embedding(vocabSize, dim),                                                   #   (vocab size, out dimention)
+    nn.RNN(dim, hiddenNodes, batch_first = True),                                   #   (B, T, D) -> ((B, T, D), (S, B, D))
+    lastTimeStep(),
+    nn.Linear(hiddenNodes, classes),                                                #   classifier
+)
+
+lossFunc = nn.CrossEntropyLoss()
+batchOneTrain = train_simple_network(rnnModel, lossFunc, trainLoader, testLoader, 
+                                     score_funcs = {'Accuracy' : accuracy_score}, device = device, epochs = 5)
+
+print(batchOneTrain)
+
+string = '<Train finished!>'
+print(f'{string:-^130}')
+
+name = input('Choose a name: ')
+
+predRnn = rnnModel.to('cpu').eval()
+with torch.no_grad():
+    preds = F.softmax(predRnn(
+        dataSet.string2InputVec(name).reshape(1, -1)), dim = -1)
+    for classId in range(len(dataSet.labelNames)):
+        print(dataSet.labelNames[classId], ':',
+              preds[0, classId].item() * 100)
