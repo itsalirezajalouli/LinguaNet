@@ -138,13 +138,16 @@ rnnModel = nn.Sequential(
     nn.Linear(hiddenNodes, classes),                                                #   classifier
 )
 
+string = ' <Train started!> '
+print(f'{string:-^130}')
+
 lossFunc = nn.CrossEntropyLoss()
 batchOneTrain = train_simple_network(rnnModel, lossFunc, trainLoader, testLoader, 
                                      score_funcs = {'Accuracy' : accuracy_score}, device = device, epochs = 5)
 
 print(batchOneTrain)
 
-string = '<Train finished!>'
+string = ' <Train finished!> '
 print(f'{string:-^130}')
 
 name = input('Choose a name: ')
