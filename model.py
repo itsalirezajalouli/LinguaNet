@@ -77,14 +77,6 @@ class langNameDataset(Dataset):
 
         return self.string2InputVec(name), label
 
-#   Train-test split
-
-dataSet = langNameDataset(data, alphabet)
-
-trainSplit, testSplit = random_split(dataSet, (len(dataSet) - 300, 300))
-
-trainLoader = DataLoader(trainSplit, batch_size = 1, shuffle = True)
-testLoader = DataLoader(testSplit, batch_size = 1, shuffle = False)
 
 #   Last time step object
 
@@ -121,6 +113,55 @@ class lastTimeStep(nn.Module):
 
         return lastStep.reshape(batchSize, -1)                                      #   Flattens the last 2 dimentions into one (out, ht) or (out, (ht, ct))
 
+def padAndPack(batch):
+
+    inputTensors = []
+    labels = []
+    lengths = []
+    for x, y in batch:
+        inputTensors.append(x)
+        labels.append(y)
+        lengths.append(x.shape[0])
+    xPadded = torch.nn.utils.rnn.pad_sequence(
+        inputTensors, batch_first = False
+    )
+    xPacked = torch.nn.utils.rnn.pack_padded_sequence(
+        xPadded, lengths, batch_first = False, enforce_sorted = False
+    )
+    yBatched = torch.as_tensor(labels, dtype = torch.long)
+    return xPacked, yBatched
+
+
+#   Train-test split
+
+dataSet = langNameDataset(data, alphabet)
+
+trainSplit, testSplit = random_split(dataSet, (len(dataSet) - 300, 300))
+
+B = 16
+
+trainLoader = DataLoader(trainSplit, batch_size = B , shuffle = True, collate_fn = padAndPack)
+testLoader = DataLoader(testSplit, batch_size = B , shuffle = False, collate_fn = padAndPack)
+
+class embeddingPackable(nn.Module):
+    '''
+    The embedding layer in Pytorch does not support Packed Sequence objects.
+    This wrapper class will fix that. If a normal input comes in, it will
+    use the regular Embedding layer. Otherwise, it will work on the packed
+    sequence to return a new Packed sequence of the appropriate result.
+    '''
+    def __init__(self, embdLayer):
+        super(EmbeddingPackable, self).__init__()
+        self.embdLayer = embdLayer
+
+    def forward(self, input):
+        if type(input) == torch.nn.utils.rnn.PackedSequence:
+            sequences, lengths = torch.nn.utils.rnn.pad_packed_sequence(input.cpu(), batch_first = True)
+            sequences = self.embdLayer(sequences.to(input.data.device))
+            return torch.nn.utils.rnn.pack_padded_sequence(sequences, lengths.cpu(), batch_first = True, enforce_sorted = False)
+        else:
+            return self.embdLayer(input)
+
 #   Hyperparameters
 
 dim = 64
@@ -132,18 +173,21 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 #   Model
 
 rnnModel = nn.Sequential(
-    nn.Embedding(vocabSize, dim),                                                   #   (vocab size, out dimention)
-    nn.RNN(dim, hiddenNodes, batch_first = True),                                   #   (B, T, D) -> ((B, T, D), (S, B, D))
-    lastTimeStep(),
+    EmbeddingPackable(nn.Embedding(vocabSize, dim)),                                                   #   (vocab size, out dimention)
+    nn.RNN(dim, hiddenNodes, num_layers = 3, batch_first = True, bidirectional = False),                                   #   (B, T, D) -> ((B, T, D), (S, B, D))
+    lastTimeStep(rnnLayers = 3),
+
     nn.Linear(hiddenNodes, classes),                                                #   classifier
 )
+
+rnnModel.to(device)
 
 string = ' <Train started!> '
 print(f'{string:-^130}')
 
 lossFunc = nn.CrossEntropyLoss()
 batchOneTrain = train_simple_network(rnnModel, lossFunc, trainLoader, testLoader, 
-                                     score_funcs = {'Accuracy' : accuracy_score}, device = device, epochs = 5)
+                                     score_funcs = {'Accuracy' : accuracy_score}, device = device, epochs = 20)
 
 print(batchOneTrain)
 
@@ -153,9 +197,10 @@ print(f'{string:-^130}')
 name = input('Choose a name: ')
 
 predRnn = rnnModel.to('cpu').eval()
+
 with torch.no_grad():
     preds = F.softmax(predRnn(
         dataSet.string2InputVec(name).reshape(1, -1)), dim = -1)
     for classId in range(len(dataSet.labelNames)):
         print(dataSet.labelNames[classId], ':',
-              preds[0, classId].item() * 100)
+              preds[0, classId].item() * 100, '%')
